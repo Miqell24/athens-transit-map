@@ -34,7 +34,7 @@
   </div>
   <script>
     const A = window.ATHENS;
-    const MODE_ORDER = ["3", "800", "900", "1"];
+    const MODE_ORDER = ["3", "800", "900", "1"]; // draw order: bus … metro on top
     const B = A.bbox;
 
     const map = new maplibregl.Map({
@@ -57,23 +57,32 @@
       },
       bounds: [[B.west, B.south], [B.east, B.north]],
       fitBoundsOptions: { padding: 20 },
+      // keep the view inside the data area (+ small margin) so lines that leave
+      // the mapped area read as the map edge, not as broken dead-ends over an
+      // empty basemap.
       maxBounds: [[B.west - 0.01, B.south - 0.01], [B.east + 0.01, B.north + 0.01]],
       maxZoom: 19,
     });
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
 
     function addData() {
-      if (map.getSource("routes")) return;
+      if (map.getSource("routes")) return; // already added
+      // deduped one-per-street geometry for the coloured lines …
+      map.addSource("lines", { type: "geojson", data: A.lines });
+      // … full per-route parts, used only for placing route numbers.
       map.addSource("routes", { type: "geojson", data: A.routes });
       map.addSource("stops", { type: "geojson", data: A.stops });
       map.addSource("termini", { type: "geojson", data: A.termini });
 
+      // Each mode gets its own parallel lane (line-offset) so where several
+      // modes share a street they sit SIDE BY SIDE, not stacked, and all stay
+      // visible. Casing (white halo) uses the same offset, drawn under all.
       const laneOf = { "3": -1.5, "800": -0.5, "900": 0.5, "1": 1.5 };
       const laneOffset = (mode) => ["interpolate", ["linear"], ["zoom"],
         11, laneOf[mode] * 1.1, 16, laneOf[mode] * 3.6];
       for (const mode of MODE_ORDER) {
         map.addLayer({
-          id: "casing-" + mode, type: "line", source: "routes",
+          id: "casing-" + mode, type: "line", source: "lines",
           filter: ["==", ["get", "mode"], mode],
           layout: { "line-cap": "round", "line-join": "round" },
           paint: {
@@ -85,7 +94,7 @@
       }
       for (const mode of MODE_ORDER) {
         map.addLayer({
-          id: "routes-" + mode, type: "line", source: "routes",
+          id: "routes-" + mode, type: "line", source: "lines",
           filter: ["==", ["get", "mode"], mode],
           layout: { "line-cap": "round", "line-join": "round" },
           paint: {
@@ -96,6 +105,8 @@
         });
       }
 
+      // route numbers written ALONG each line (mode-colored), repeated down the
+      // street; MapLibre's collision thins them out and more appear as you zoom.
       for (const mode of MODE_ORDER) {
         map.addLayer({
           id: "nums-" + mode, type: "symbol", source: "routes", minzoom: 13,
@@ -104,6 +115,7 @@
             "symbol-placement": "line",
             "text-field": ["get", "rsn"],
             "text-font": ["Open Sans Bold"],
+            // ~2x bigger and lifted off the line (per Alex's feedback).
             "text-size": ["interpolate", ["linear"], ["zoom"], 13, 18, 17, 26],
             "text-offset": [0, -1.4],
             "symbol-spacing": 260,
@@ -118,6 +130,11 @@
         });
       }
 
+      const modeMatch = ["match", ["get", "topMode"]];
+      for (const m of MODE_ORDER) modeMatch.push(m, A.colors[m]);
+      modeMatch.push("#555");
+
+      // all stops: white inside, black outline
       map.addLayer({
         id: "stops", type: "circle", source: "stops",
         paint: {
@@ -127,6 +144,8 @@
           "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 11, 1, 16, 2],
         },
       });
+      // terminus / loop markers — a bigger, thicker white/black ring at every
+      // line-end inside the map (distinct from ordinary stops by size).
       map.addLayer({
         id: "termini", type: "circle", source: "termini",
         paint: {
@@ -146,38 +165,41 @@
           "text-variable-anchor": ["left", "right", "top", "bottom"],
           "text-radial-offset": 0.7,
           "text-justify": "auto",
-          "text-optional": true,
+          "text-optional": true,          // hide label (keep dot) when it collides
           "text-padding": 3,
         },
         paint: { "text-color": "#1a1a1a", "text-halo-color": "#fff", "text-halo-width": 1.4 },
       });
 
+      // ---- click a stop -> popup with name + lines ----
       map.on("click", "stops", (e) => {
         const p = e.features[0].properties;
         const lines = typeof p.lines === "string" ? JSON.parse(p.lines) : p.lines;
         const chips = lines.map((l) =>
-          `<span class=\"chip\" style=\"background:${A.colors[l.mode]}\">${l.rsn}</span>`).join("");
+          `<span class="chip" style="background:${A.colors[l.mode]}">${l.rsn}</span>`).join("");
         new maplibregl.Popup({ offset: 8, maxWidth: "280px" })
           .setLngLat(e.lngLat)
-          .setHTML(`<div class=\"pop-name\">${p.name}</div><div class=\"pop-lines\">${chips}</div>`)
+          .setHTML(`<div class="pop-name">${p.name}</div><div class="pop-lines">${chips}</div>`)
           .addTo(map);
       });
       map.on("mouseenter", "stops", () => (map.getCanvas().style.cursor = "pointer"));
       map.on("mouseleave", "stops", () => (map.getCanvas().style.cursor = ""));
 
+      // ---- click a terminus -> popup: lines that end / turn here ----
       map.on("click", "termini", (e) => {
         const p = e.features[0].properties;
         const lines = typeof p.lines === "string" ? JSON.parse(p.lines) : p.lines;
         const chips = lines.map((l) =>
-          `<span class=\"chip\" style=\"background:${A.colors[l.mode]}\">${l.rsn}</span>`).join("");
+          `<span class="chip" style="background:${A.colors[l.mode]}">${l.rsn}</span>`).join("");
         new maplibregl.Popup({ offset: 8, maxWidth: "280px" })
           .setLngLat(e.lngLat)
-          .setHTML(`<div class=\"pop-name\">Terminus / loop</div><div class=\"pop-lines\">${chips}</div>`)
+          .setHTML(`<div class="pop-name">Terminus / loop</div><div class="pop-lines">${chips}</div>`)
           .addTo(map);
       });
       map.on("mouseenter", "termini", () => (map.getCanvas().style.cursor = "pointer"));
       map.on("mouseleave", "termini", () => (map.getCanvas().style.cursor = ""));
 
+      // ---- mode filter toggles: affect lines, numbers, stops, termini ----
       const names = { "1": "Metro", "900": "Tram", "800": "Trolleybus", "3": "Bus" };
       const active = new Set(["1", "900", "800", "3"]);
       function applyFilters() {
@@ -188,6 +210,9 @@
           map.setLayoutProperty("routes-" + m, "visibility", vis);
           map.setLayoutProperty("nums-" + m, "visibility", vis);
         }
+        // stops / termini: show only if AT LEAST ONE active mode serves them.
+        // ["any"] with no active modes evaluates to false -> everything hidden
+        // (fixes dots staying after the last mode is switched off).
         const anyActive = ["any", ...on.map((m) => ["in", m, ["get", "modes"]])];
         map.setFilter("stops", anyActive);
         map.setFilter("stop-labels", anyActive);
@@ -198,8 +223,8 @@
       for (const mode of ["1", "900", "800", "3"]) {
         const row = document.createElement("label");
         row.innerHTML =
-          `<input type=\"checkbox\" checked data-mode=\"${mode}\">` +
-          `<span class=\"swatch\" style=\"background:${A.colors[mode]}\"></span>${names[mode]}`;
+          `<input type="checkbox" checked data-mode="${mode}">` +
+          `<span class="swatch" style="background:${A.colors[mode]}"></span>${names[mode]}`;
         row.querySelector("input").addEventListener("change", (ev) => {
           if (ev.target.checked) active.add(mode); else active.delete(mode);
           applyFilters();
@@ -209,6 +234,9 @@
       applyFilters();
     }
 
+    // Add the transit data once the style is ready. We do NOT wait for the
+    // "load" event (it also waits for basemap tiles, which can stall); poll for
+    // the style instead so sources/layers are added reliably.
     (function tryAdd() {
       if (map.isStyleLoaded()) addData();
       else setTimeout(tryAdd, 80);
